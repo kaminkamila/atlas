@@ -1,6 +1,6 @@
 // src/App.tsx
 //федя лох
-// камила лошара
+// камила лошара сто проц
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 
