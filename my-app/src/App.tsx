@@ -1,4 +1,5 @@
 // src/App.tsx
+//федя лох
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 
