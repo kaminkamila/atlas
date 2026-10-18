@@ -1,26 +1,27 @@
 // src/App.tsx
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
+
+// 1. Импортируем всё пространство имен (для v6 это обязательно)
 import * as maplibregl from 'maplibre-gl';
 import type {
   Map as MapLibreMap,
   MapLayerMouseEvent,
   StyleSpecification,
 } from 'maplibre-gl';
-import 'maplibre-gl/dist/maplibre-gl.css';
 
-/* ------------------------------------------------------------------ */
-/* Конфиг                                                              */
-/* ------------------------------------------------------------------ */
+// 2. Импортируем URL воркера с помощью специального синтаксиса Vite
+import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
+
+// 3. Указываем MapLibre, где находится воркер (до создания карты!)
+maplibregl.setWorkerUrl(maplibreWorkerUrl);
+
+import 'maplibre-gl/dist/maplibre-gl.css';
 
 const GEOJSON_URL = 'src/osnova.geojson';
 
 const MIN_ZOOM = 2;
 const MAX_ZOOM = 14;
-
-/* ------------------------------------------------------------------ */
-/* Пустой стиль — БЕЗ слоя background                                   */
-/* ------------------------------------------------------------------ */
 
 const EMPTY_STYLE: StyleSpecification = {
   version: 8,
