@@ -1,10 +1,8 @@
 // src/App.tsx
-//федя лох
-// камила лошара сто проц
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 
-// 1. Импортируем всё пространство имен (для v6 это обязательно)
+// 1. Импортируем всё пространство имен
 import * as maplibregl from 'maplibre-gl';
 import type {
   Map as MapLibreMap,
@@ -20,6 +18,7 @@ maplibregl.setWorkerUrl(maplibreWorkerUrl);
 
 import 'maplibre-gl/dist/maplibre-gl.css';
 
+// Рекомендуется положить файл в папку public, чтобы Vite корректно отдал его по абсолютном пути
 const GEOJSON_URL = 'src/osnova.geojson';
 
 const MIN_ZOOM = 2;
@@ -31,10 +30,6 @@ const EMPTY_STYLE: StyleSpecification = {
   sources: {},
   layers: [],
 };
-
-/* ------------------------------------------------------------------ */
-/* Компонент                                                           */
-/* ------------------------------------------------------------------ */
 
 type Status = 'loading' | 'ready' | 'error';
 
@@ -52,7 +47,7 @@ export default function App() {
       container: containerRef.current,
       style: EMPTY_STYLE,
       center: [37, 39],
-      zoom: 5,
+      zoom: 8,
       minZoom: MIN_ZOOM,
       maxZoom: MAX_ZOOM,
       attributionControl: false,
@@ -166,7 +161,7 @@ export default function App() {
 }
 
 /* ------------------------------------------------------------------ */
-/* Растровая подложка мира                                              */
+/* Растровая подложка мира                                            */
 /* ------------------------------------------------------------------ */
 
 function addWorldBasemap(map: MapLibreMap) {
@@ -192,7 +187,7 @@ function addWorldBasemap(map: MapLibreMap) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Слои данных                                                         */
+/* Слои данных                                                        */
 /* ------------------------------------------------------------------ */
 
 function addOsnova(map: MapLibreMap, data: GeoJSON.FeatureCollection) {
@@ -370,7 +365,7 @@ function addOsnova(map: MapLibreMap, data: GeoJSON.FeatureCollection) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Ховер-попапы                                                        */
+/* Ховер-попапы                                                       */
 /* ------------------------------------------------------------------ */
 
 function attachInteractions(map: MapLibreMap) {
@@ -393,7 +388,7 @@ function attachInteractions(map: MapLibreMap) {
         `<div style="font-family:system-ui;font-size:16px;line-height:1.5">
            <strong>${escapeHtml(String(p.name_ru ?? p.name_local ?? '—'))}</strong><br/>
            <span style="color:#666">${escapeHtml(String(p.name_local ?? ''))}</span><br/>
-           <span>Население: <b>${formatNumber(p.population as number)}</b></span><br/>
+           <span>Население: <b>${formatNumber(p.population)}</b></span><br/>
            <span style="color:#888">${escapeHtml(String(p.country_iso ?? ''))}</span>
          </div>`,
       )
@@ -448,7 +443,7 @@ function attachInteractions(map: MapLibreMap) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Утилиты геометрии                                                   */
+/* Утилиты геометрии                                                  */
 /* ------------------------------------------------------------------ */
 
 function computeBounds(
@@ -476,8 +471,7 @@ function computeBounds(
 
   for (const f of fc.features) {
     if (!f.geometry) continue;
-    // @ts-expect-error — geometry.coordinates есть у всех типов
-    walk(f.geometry.coordinates);
+    walk((f.geometry as { coordinates?: unknown }).coordinates);
   }
 
   if (!Number.isFinite(minX)) return null;
@@ -495,7 +489,7 @@ function padBounds(
 }
 
 /* ------------------------------------------------------------------ */
-/* Утилиты                                                             */
+/* Утилиты                                                            */
 /* ------------------------------------------------------------------ */
 
 function formatNumber(n: unknown): string {
@@ -510,7 +504,7 @@ function escapeHtml(s: string): string {
 }
 
 /* ------------------------------------------------------------------ */
-/* Легенда — крупная                                                   */
+/* Легенда                                                            */
 /* ------------------------------------------------------------------ */
 
 function LegendRow({
@@ -555,7 +549,7 @@ function LegendRow({
 }
 
 /* ------------------------------------------------------------------ */
-/* Стили                                                               */
+/* Стили                                                              */
 /* ------------------------------------------------------------------ */
 
 const styles: Record<string, CSSProperties> = {
@@ -594,7 +588,7 @@ const styles: Record<string, CSSProperties> = {
     left: 40,
     padding: '28px 34px',
     borderRadius: 16,
-    background: 'rgba(255,255,255,0.97)',
+    background: 'rgba(255,255,257,0.97)',
     boxShadow: '0 10px 32px rgba(0,0,0,0.22)',
     zIndex: 10,
     minWidth: 380,
