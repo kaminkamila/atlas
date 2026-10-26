@@ -1,105 +1,148 @@
-// src/App.tsx
-import { useEffect, useRef, useState } from 'react';
-import type { CSSProperties } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 
-// 1. Импортируем всё пространство имен
-import * as maplibregl from 'maplibre-gl';
-import type {
-  Map as MapLibreMap,
-  MapLayerMouseEvent,
-  StyleSpecification,
-} from 'maplibre-gl';
-
-// 2. Импортируем URL воркера с помощью специального синтаксиса Vite
-import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
-
-// 3. Указываем MapLibre, где находится воркер (до создания карты!)
-maplibregl.setWorkerUrl(maplibreWorkerUrl);
-
-import 'maplibre-gl/dist/maplibre-gl.css';
-
-// Рекомендуется положить файл в папку public, чтобы Vite корректно отдал его по абсолютном пути
-const GEOJSON_URL = 'src/osnova.geojson';
-
-const MIN_ZOOM = 2;
-const MAX_ZOOM = 14;
-
-const EMPTY_STYLE: StyleSpecification = {
-  version: 8,
-  glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
-  sources: {},
-  layers: [],
+// ============================================================================
+// 1. ПУТИ К ФАЙЛАМ В ПАПКЕ public/
+// Проверь, чтобы имена файлов совпадали с твоими в папке public/
+// ============================================================================
+const DATA_FILES = {
+  rivers: '/riv.geojson',       // Файл рек (с полями name_ru, strokeweig, scale_rank)
+  roads: '/road.geojson',         // Файл дорог (с полями ROAD_TYPE, CLASS_6M, LABEL, LABEL2, TOLL)
+  railroads: '/rail.geojson', // Файл ж/д (с полями featurecla, scalerank, passenger)
+  cities: '/cities.geojson',       // Файл городов (с полями name_ru, population, country_iso)
 };
 
-type Status = 'loading' | 'ready' | 'error';
+// ============================================================================
+// 2. ТИПЫ АТРИБУТОВ GEOJSON
+// ============================================================================
+interface RiverProps {
+  OBJECTID: number;
+  name?: string;
+  name_ru?: string;
+  scale_rank?: number;
+  strokeweig?: number;
+}
+
+interface RoadProps {
+  OBJECTID: number;
+  CLASS_6M?: string | null;
+  ROAD_TYPE?: 'Expressway' | 'Other Highway' | 'Road' | string | null;
+  RANK?: number | null;
+  SOV_A3?: string | null;
+  LEN_KM?: number | null;
+  LABEL?: string | null;
+  LABEL2?: string | null;
+  INT_NET?: string | null;
+  TOLL?: number | null;
+}
+
+interface RailProps {
+  OBJECTID: number;
+  featurecla?: 'Railroad' | 'High Speed Rail' | 'Railroad ferry' | string;
+  scalerank?: number;
+  passenger?: number;
+  disp_scale?: string;
+}
+
+interface CityProps {
+  OBJECTID: number;
+  name_ru?: string;
+  name_local?: string | null;
+  country_iso?: string | null;
+  population?: number;
+}
+
+type RoadFilterMode = 'all' | 'expressway_only' | 'major';
 
 export default function App() {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<MapLibreMap | null>(null);
-  const [status, setStatus] = useState<Status>('loading');
-  const [errorMsg, setErrorMsg] = useState('');
-  const [basemapVisible, setBasemapVisible] = useState(true);
+  const mapContainerRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<L.Map | null>(null);
+  const osmLayerRef = useRef<L.TileLayer | null>(null);
 
+  // Группы слоёв Leaflet
+  const riversGroupRef = useRef<L.LayerGroup | null>(null);
+  const railsGroupRef = useRef<L.LayerGroup | null>(null);
+  const roadsGroupRef = useRef<L.LayerGroup | null>(null);
+  const citiesGroupRef = useRef<L.LayerGroup | null>(null);
+
+  // Загруженные данные GeoJSON
+  const [riversData, setRiversData] = useState<GeoJSON.FeatureCollection | null>(null);
+  const [roadsData, setRoadsData] = useState<GeoJSON.FeatureCollection | null>(null);
+  const [railsData, setRailsData] = useState<GeoJSON.FeatureCollection | null>(null);
+  const [citiesData, setCitiesData] = useState<GeoJSON.FeatureCollection | null>(null);
+  const [loadingError, setLoadingError] = useState<string | null>(null);
+
+  // Состояния подложки
+  const [showOsm, setShowOsm] = useState<boolean>(true);
+  const [osmOpacity, setOsmOpacity] = useState<number>(0.65);
+
+  // Состояния видимости слоёв
+  const [showRivers, setShowRivers] = useState<boolean>(true);
+  const [showRails, setShowRails] = useState<boolean>(true);
+  const [showRoads, setShowRoads] = useState<boolean>(true);
+  const [showCities, setShowCities] = useState<boolean>(true);
+  const [showCityLabels, setShowCityLabels] = useState<boolean>(true);
+
+  // Фильтры данных
+  const [roadFilter, setRoadFilter] = useState<RoadFilterMode>('all');
+  const [onlyTurkeyRoads, setOnlyTurkeyRoads] = useState<boolean>(false);
+  const [showForeignCities, setShowForeignCities] = useState<boolean>(false);
+
+  // Текущий зум для адаптивной генерализации
+  const [zoom, setZoom] = useState<number>(6);
+
+  // Информация о выбранном объекте
+  const [selectedInfo, setSelectedInfo] = useState<{
+    layer: string;
+    title: string;
+    details: Record<string, string | number>;
+  } | null>(null);
+
+  // ==========================================================================
+  // ИНИЦИАЛИЗАЦИЯ КАРТЫ И КАСТОМНЫХ ПЕЙНОВ (Z-INDEX ИЕРАРХИЯ)
+  // ==========================================================================
   useEffect(() => {
-    if (!containerRef.current || mapRef.current) return;
+    if (!mapContainerRef.current || mapRef.current) return;
 
-    const map = new maplibregl.Map({
-      container: containerRef.current,
-      style: EMPTY_STYLE,
-      center: [37, 39],
-      zoom: 8,
-      minZoom: MIN_ZOOM,
-      maxZoom: MAX_ZOOM,
-      attributionControl: false,
+    const map = L.map(mapContainerRef.current, {
+      center: [39.0, 35.2], // Центр Турции
+      zoom: 6,
+      minZoom: 4,
+      maxZoom: 14,
+      zoomControl: false,
+      preferCanvas: false,
     });
+
+    L.control.zoom({ position: 'bottomright' }).addTo(map);
+    L.control.scale({ imperial: false, position: 'bottomleft' }).addTo(map);
+
+    // Создаём строгую иерархию слоёв (снизу вверх: реки -> ж/д -> дороги -> города)
+    map.createPane('riversPane').style.zIndex = '410';
+    map.createPane('railsPane').style.zIndex = '420';
+    map.createPane('roadsCasingPane').style.zIndex = '430';
+    map.createPane('roadsCorePane').style.zIndex = '435';
+    map.createPane('citiesPane').style.zIndex = '450';
+
+    // Подложка OpenStreetMap
+    const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors',
+      opacity: osmOpacity,
+    });
+    osmLayer.addTo(map);
+    osmLayerRef.current = osmLayer;
+
+    // Инициализируем пустые группы
+    riversGroupRef.current = L.layerGroup().addTo(map);
+    railsGroupRef.current = L.layerGroup().addTo(map);
+    roadsGroupRef.current = L.layerGroup().addTo(map);
+    citiesGroupRef.current = L.layerGroup().addTo(map);
+
+    map.on('zoomend', () => {
+      setZoom(map.getZoom());
+    });
+
     mapRef.current = map;
-
-    map.addControl(
-      new maplibregl.NavigationControl({ visualizePitch: true }),
-      'top-right',
-    );
-    map.addControl(
-      new maplibregl.ScaleControl({ maxWidth: 160, unit: 'metric' }),
-      'bottom-left',
-    );
-    map.addControl(
-      new maplibregl.AttributionControl({
-        compact: true,
-        customAttribution: '© OpenStreetMap © CARTO · Natural Earth',
-      }),
-      'bottom-right',
-    );
-
-    map.on('load', async () => {
-      try {
-        addWorldBasemap(map);
-
-        const res = await fetch(GEOJSON_URL);
-        if (!res.ok) {
-          throw new Error(`Не удалось загрузить ${GEOJSON_URL}: ${res.status}`);
-        }
-        const geojson = (await res.json()) as GeoJSON.FeatureCollection;
-
-        addOsnova(map, geojson);
-        attachInteractions(map);
-
-        const bounds = computeBounds(geojson);
-        if (bounds) {
-          map.fitBounds(bounds, { padding: 60, animate: false });
-          map.setMaxBounds(padBounds(bounds, 1.5));
-        }
-
-        setStatus('ready');
-      } catch (err) {
-        console.error(err);
-        setStatus('error');
-        setErrorMsg(err instanceof Error ? err.message : String(err));
-      }
-    });
-
-    map.on('error', (e) => {
-      console.warn('[maplibre]', e.error?.message ?? e);
-    });
 
     return () => {
       map.remove();
@@ -107,500 +150,684 @@ export default function App() {
     };
   }, []);
 
-  /* Показать/скрыть растровую подложку */
-  const toggleBasemap = () => {
+  // ==========================================================================
+  // УПРАВЛЕНИЕ ПОДЛОЖКОЙ OSM
+  // ==========================================================================
+  useEffect(() => {
     const map = mapRef.current;
-    if (!map || !map.getLayer('world')) return;
+    const osmLayer = osmLayerRef.current;
+    if (!map || !osmLayer) return;
 
-    const next = !basemapVisible;
-    map.setLayoutProperty('world', 'visibility', next ? 'visible' : 'none');
-    setBasemapVisible(next);
-  };
+    if (showOsm) {
+      if (!map.hasLayer(osmLayer)) osmLayer.addTo(map);
+      osmLayer.setOpacity(osmOpacity);
+    } else {
+      if (map.hasLayer(osmLayer)) map.removeLayer(osmLayer);
+    }
+  }, [showOsm, osmOpacity]);
+
+  // ==========================================================================
+  // ЗАГРУЗКА ФАЙЛОВ ИЗ ПАПКИ PUBLIC
+  // ==========================================================================
+  useEffect(() => {
+    async function loadGeoJSON(url: string) {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Не удалось загрузить ${url} (${res.status})`);
+      return res.json();
+    }
+
+    Promise.allSettled([
+      loadGeoJSON(DATA_FILES.rivers),
+      loadGeoJSON(DATA_FILES.roads),
+      loadGeoJSON(DATA_FILES.railroads),
+      loadGeoJSON(DATA_FILES.cities),
+    ]).then((results) => {
+      const errors: string[] = [];
+
+      if (results[0].status === 'fulfilled') setRiversData(results[0].value);
+      else errors.push(DATA_FILES.rivers);
+
+      if (results[1].status === 'fulfilled') setRoadsData(results[1].value);
+      else errors.push(DATA_FILES.roads);
+
+      if (results[2].status === 'fulfilled') setRailsData(results[2].value);
+      else errors.push(DATA_FILES.railroads);
+
+      if (results[3].status === 'fulfilled') setCitiesData(results[3].value);
+      else errors.push(DATA_FILES.cities);
+
+      if (errors.length > 0) {
+        setLoadingError(`Не найдены файлы в public/: ${errors.join(', ')}. Проверь константу DATA_FILES.`);
+      }
+    });
+  }, []);
+
+  // ==========================================================================
+  // ОТРИСОВКА СЛОЯ РЕК
+  // ==========================================================================
+  useEffect(() => {
+    const group = riversGroupRef.current;
+    if (!group) return;
+    group.clearLayers();
+
+    if (!showRivers || !riversData) return;
+
+    const zoomFactor = Math.max(0.7, (zoom - 4) * 0.45);
+
+    const layer = L.geoJSON(riversData, {
+      pane: 'riversPane',
+      style: (feature) => {
+        const props = (feature?.properties || {}) as RiverProps;
+        const baseWeight = props.strokeweig ?? 0.4;
+        return {
+          color: '#1f78b4',
+          weight: Math.max(1.0, baseWeight * 3.0 * zoomFactor),
+          opacity: 0.85,
+          lineCap: 'round',
+          lineJoin: 'round',
+        };
+      },
+      onEachFeature: (feature, lyr) => {
+        const props = (feature.properties || {}) as RiverProps;
+        const ruName = props.name_ru?.trim() || props.name?.trim() || 'Река без названия';
+
+        lyr.bindTooltip(`р. ${ruName}`, {
+          sticky: true,
+          direction: 'top',
+        });
+
+        lyr.on({
+          mouseover: (e) => {
+            const target = e.target as L.Path;
+            target.setStyle({ color: '#084594', weight: 4, opacity: 1 });
+          },
+          mouseout: (e) => {
+            layer.resetStyle(e.target);
+          },
+          click: () => {
+            setSelectedInfo({
+              layer: 'Речная сеть',
+              title: ruName,
+              details: {
+                'Международное название': props.name || '—',
+                'Ранг (scale_rank)': props.scale_rank ?? '—',
+                'Вес линии (strokeweig)': props.strokeweig ?? '—',
+              },
+            });
+          },
+        });
+      },
+    });
+
+    group.addLayer(layer);
+  }, [riversData, showRivers, zoom]);
+
+  // ==========================================================================
+  // ОТРИСОВКА СЛОЯ ЖЕЛЕЗНЫХ ДОРОГ (ДВУХСЛОЙНЫЙ СПОСОБ: ОСНОВА + ШПАЛЫ / ВСМ)
+  // ==========================================================================
+  useEffect(() => {
+    const group = railsGroupRef.current;
+    if (!group) return;
+    group.clearLayers();
+
+    if (!showRails || !railsData) return;
+
+    // 1. Нижний базовый слой линий ж/д
+    const baseRailLayer = L.geoJSON(railsData, {
+      pane: 'railsPane',
+      style: (feature) => {
+        const props = (feature?.properties || {}) as RailProps;
+        const type = props.featurecla;
+
+        if (type === 'Railroad ferry') {
+          return {
+            color: '#2b5c8f',
+            weight: 2.0,
+            dashArray: '5, 6',
+            opacity: 0.85,
+          };
+        }
+        if (type === 'High Speed Rail') {
+          return {
+            color: '#99000d',
+            weight: 3.4,
+            opacity: 0.95,
+          };
+        }
+        return {
+          color: '#252525',
+          weight: 2.6,
+          opacity: 0.9,
+        };
+      },
+      onEachFeature: (feature, lyr) => {
+        const props = (feature.properties || {}) as RailProps;
+        const typeLabel =
+          props.featurecla === 'High Speed Rail'
+            ? 'Высокоскоростная магистраль (YHT)'
+            : props.featurecla === 'Railroad ferry'
+              ? 'Железнодорожный паром'
+              : 'Железная дорога';
+
+        lyr.bindTooltip(typeLabel, { sticky: true });
+        lyr.on('click', () => {
+          setSelectedInfo({
+            layer: 'Железные дороги',
+            title: typeLabel,
+            details: {
+              'Тип (featurecla)': props.featurecla || '—',
+              'Пассажирское движение': props.passenger === 1 ? 'Да' : 'Нет',
+              'Ранг (scalerank)': props.scalerank ?? '—',
+              'Масштаб отображения': props.disp_scale || '—',
+            },
+          });
+        });
+      },
+    });
+
+    // 2. Верхний штриховой слой («шпалы») для обычных и высокоскоростных ж/д
+    const tiesRailLayer = L.geoJSON(railsData, {
+      pane: 'railsPane',
+      filter: (feature) => {
+        const props = (feature?.properties || {}) as RailProps;
+        return props.featurecla !== 'Railroad ferry';
+      },
+      style: (feature) => {
+        const props = (feature?.properties || {}) as RailProps;
+        if (props.featurecla === 'High Speed Rail') {
+          return {
+            color: '#ffeda0',
+            weight: 1.6,
+            dashArray: '6, 6',
+            opacity: 0.95,
+            interactive: false,
+          };
+        }
+        return {
+          color: '#ffffff',
+          weight: 1.4,
+          dashArray: '4, 5',
+          opacity: 0.95,
+          interactive: false,
+        };
+      },
+    });
+
+    group.addLayer(baseRailLayer);
+    group.addLayer(tiesRailLayer);
+  }, [railsData, showRails]);
+
+  // ==========================================================================
+  // ОТРИСОВКА АВТОМАГИСТРАЛЕЙ И ДОРОГ (CASING + ВНУТРЕННЯЯ ЛИНИЯ)
+  // ==========================================================================
+  useEffect(() => {
+    const group = roadsGroupRef.current;
+    if (!group) return;
+    group.clearLayers();
+
+    if (!showRoads || !roadsData) return;
+
+    const filterFn = (feature: GeoJSON.Feature) => {
+      const props = (feature.properties || {}) as RoadProps;
+      if (onlyTurkeyRoads && props.SOV_A3 && props.SOV_A3 !== 'TUR') {
+        return false;
+      }
+      if (roadFilter === 'expressway_only') {
+        return props.ROAD_TYPE === 'Expressway' || props.CLASS_6M === 'M';
+      }
+      if (roadFilter === 'major') {
+        return (
+          props.ROAD_TYPE === 'Expressway' ||
+          props.ROAD_TYPE === 'Other Highway' ||
+          props.CLASS_6M === 'M' ||
+          props.CLASS_6M === 'H'
+        );
+      }
+      return true;
+    };
+
+    // 1. Внешняя обводка (Casing) для читаемости поверх любой подложки
+    const casingLayer = L.geoJSON(roadsData, {
+      pane: 'roadsCasingPane',
+      filter: filterFn,
+      style: (feature) => {
+        const props = (feature?.properties || {}) as RoadProps;
+        const isExpressway = props.ROAD_TYPE === 'Expressway' || props.CLASS_6M === 'M';
+        const isHighway = props.ROAD_TYPE === 'Other Highway' || props.CLASS_6M === 'H';
+
+        return {
+          color: isExpressway ? '#7f2704' : isHighway ? '#8c510a' : '#636363',
+          weight: isExpressway ? 4.8 : isHighway ? 3.4 : 2.2,
+          opacity: 0.9,
+          lineCap: 'round',
+          lineJoin: 'round',
+          interactive: false,
+        };
+      },
+    });
+
+    // 2. Внутренняя цветная линия + интерактивность
+    const coreLayer = L.geoJSON(roadsData, {
+      pane: 'roadsCorePane',
+      filter: filterFn,
+      style: (feature) => {
+        const props = (feature?.properties || {}) as RoadProps;
+        const isExpressway = props.ROAD_TYPE === 'Expressway' || props.CLASS_6M === 'M';
+        const isHighway = props.ROAD_TYPE === 'Other Highway' || props.CLASS_6M === 'H';
+
+        return {
+          color: isExpressway ? '#ff7f00' : isHighway ? '#fdb863' : '#e0e0e0',
+          weight: isExpressway ? 2.8 : isHighway ? 1.8 : 1.0,
+          opacity: 1,
+          lineCap: 'round',
+          lineJoin: 'round',
+        };
+      },
+      onEachFeature: (feature, lyr) => {
+        const props = (feature.properties || {}) as RoadProps;
+        const label1 = props.LABEL?.trim() || '';
+        const label2 = props.LABEL2?.trim() || '';
+        const routeCode = [label1, label2].filter(Boolean).join(' / ') || 'Без индекса';
+
+        const typeRu =
+          props.ROAD_TYPE === 'Expressway'
+            ? 'Автомагистраль (Otoyol)'
+            : props.ROAD_TYPE === 'Other Highway'
+              ? 'Государственное шоссе'
+              : 'Дорога регионального значения';
+
+        lyr.bindTooltip(`${typeRu}: <b>${routeCode}</b>`, { sticky: true });
+
+        lyr.on({
+          mouseover: (e) => {
+            const target = e.target as L.Path;
+            target.setStyle({ color: '#ffff33', weight: 4 });
+          },
+          mouseout: (e) => {
+            coreLayer.resetStyle(e.target);
+          },
+          click: () => {
+            setSelectedInfo({
+              layer: 'Автодорожная сеть',
+              title: `${typeRu} (${routeCode})`,
+              details: {
+                'Национальный индекс (LABEL)': label1 || '—',
+                'Европейский маршрут (LABEL2)': label2 || '—',
+                'Категория (ROAD_TYPE)': props.ROAD_TYPE || 'Прочая',
+                'Платный участок (TOLL)': props.TOLL === 1 ? 'Да (платная)' : 'Нет',
+                'Протяжённость сегмента': props.LEN_KM ? `${props.LEN_KM} км` : '—',
+                'Страна (SOV_A3)': props.SOV_A3 || 'TUR',
+              },
+            });
+          },
+        });
+      },
+    });
+
+    group.addLayer(casingLayer);
+    group.addLayer(coreLayer);
+  }, [roadsData, showRoads, roadFilter, onlyTurkeyRoads]);
+
+  // ==========================================================================
+  // ОТРИСОВКА ГОРОДОВ (ПУНСОНЫ ПО ЛЮДНОСТИ + ПОДПИСИ)
+  // ==========================================================================
+  useEffect(() => {
+    const group = citiesGroupRef.current;
+    if (!group) return;
+    group.clearLayers();
+
+    if (!showCities || !citiesData) return;
+
+    // Ступенчатая шкала радиуса пунсона по населению
+    const getCityRadius = (pop: number) => {
+      if (pop >= 10_000_000) return 9.5; // Стамбул
+      if (pop >= 2_000_000) return 7.5;  // Анкара, Бурса, Измир, Газиантеп...
+      if (pop >= 1_000_000) return 6.0;  // Адана, Конья, Анталия, Кайсери...
+      if (pop >= 500_000) return 5.0;    // Эскишехир, Эрзурум, Малатья, Мерсин, Ван...
+      if (pop >= 250_000) return 4.2;    // Трабзон, Самсун, Денизли, Сивас...
+      return 3.4;                        // Менее 250 тыс.
+    };
+
+    const layer = L.geoJSON(citiesData, {
+      pane: 'citiesPane',
+      filter: (feature) => {
+        const props = (feature.properties || {}) as CityProps;
+        // В файле у Айдына country_iso === null, поэтому считаем и 'TR', и null городами Турции
+        const isTurkish = props.country_iso === 'TR' || props.country_iso === null;
+        return showForeignCities ? true : isTurkish;
+      },
+      pointToLayer: (feature, latlng) => {
+        const props = (feature.properties || {}) as CityProps;
+        const pop = props.population || 0;
+        const isTurkish = props.country_iso === 'TR' || props.country_iso === null;
+        const isCapital = props.name_ru === 'Анкара';
+
+        const marker = L.circleMarker(latlng, {
+          pane: 'citiesPane',
+          radius: getCityRadius(pop),
+          fillColor: isCapital ? '#e31a1c' : isTurkish ? '#ffffff' : '#d9d9d9',
+          color: isCapital ? '#800026' : isTurkish ? '#1a1a1a' : '#666666',
+          weight: isCapital ? 2.5 : 1.8,
+          fillOpacity: 0.95,
+        });
+
+        const nameRu = props.name_ru || props.name_local || 'Город';
+
+        if (showCityLabels) {
+          marker.bindTooltip(nameRu, {
+            permanent: true,
+            direction: 'right',
+            offset: [6, 0],
+            className: isCapital
+              ? 'city-label city-label-capital'
+              : isTurkish
+                ? 'city-label'
+                : 'city-label city-label-foreign',
+          });
+        } else {
+          marker.bindTooltip(`${nameRu} (${pop.toLocaleString('ru-RU')} чел.)`, {
+            direction: 'top',
+          });
+        }
+
+        marker.on('click', () => {
+          setSelectedInfo({
+            layer: 'Населённые пункты',
+            title: nameRu,
+            details: {
+              'Местное название': props.name_local || '—',
+              'Численность населения': `${pop.toLocaleString('ru-RU')} чел.`,
+              'Код страны': props.country_iso || 'TR',
+            },
+          });
+        });
+
+        return marker;
+      },
+    });
+
+    group.addLayer(layer);
+  }, [citiesData, showCities, showCityLabels, showForeignCities]);
 
   return (
-    <div style={styles.root}>
-      <div ref={containerRef} style={styles.map} />
+    <div style={{ display: 'flex', width: '100vw', height: '100vh', fontFamily: 'system-ui, sans-serif' }}>
+      {/* Стили для подписей городов */}
+      <style>{`
+        .city-label {
+          background: rgba(255, 255, 255, 0.82);
+          border: 1px solid rgba(0, 0, 0, 0.2);
+          border-radius: 3px;
+          padding: 1px 4px;
+          font-size: 11px;
+          font-weight: 600;
+          color: #1f2937;
+          box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+          pointer-events: none;
+        }
+        .city-label::before {
+          display: none;
+        }
+        .city-label-capital {
+          background: #fee2e2;
+          border-color: #ef4444;
+          color: #991b1b;
+          font-size: 12px;
+          font-weight: 700;
+        }
+        .city-label-foreign {
+          background: rgba(243, 244, 246, 0.75);
+          color: #6b7280;
+          font-weight: 500;
+        }
+      `}</style>
 
-      {status === 'loading' && <div style={styles.toast}>Загрузка карты…</div>}
-      {status === 'error' && (
-        <div style={{ ...styles.toast, color: 'crimson' }}>
-          Ошибка: {errorMsg}
-        </div>
-      )}
-
-      {status === 'ready' && (
-        <>
-          <button
-            type="button"
-            onClick={toggleBasemap}
-            style={{
-              ...styles.toggleBtn,
-              background: basemapVisible ? '#1f6feb' : '#ffffff',
-              color: basemapVisible ? '#ffffff' : '#1f2937',
-              borderColor: basemapVisible ? '#1f6feb' : '#cbd5e1',
-            }}
-            title={basemapVisible ? 'Скрыть подложку' : 'Показать подложку'}
-          >
-            {basemapVisible ? 'Подложка: вкл' : 'Подложка: выкл'}
-          </button>
-
-          <div style={styles.legend}>
-            <div style={styles.legendTitle}>Условные обозначения</div>
-            <LegendRow color="#FFFACD" label="Территория" />
-            <LegendRow color="#1a1a1a" label="Города" round />
-            <LegendRow color="#8B4513" label="Горы" round />
-            <LegendRow color="#3d6db3" label="Впадины" round />
-            <LegendRow color="#444444" label="Границы" />
-            <LegendRow color="#e67e22" label="Дороги" />
-            <LegendRow color="#2b2b2b" label="Железные дороги" dashed />
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/* Растровая подложка мира                                            */
-/* ------------------------------------------------------------------ */
-
-function addWorldBasemap(map: MapLibreMap) {
-  if (map.getSource('world')) return;
-
-  map.addSource('world', {
-    type: 'raster',
-    tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-    tileSize: 256,
-    attribution: '© OpenStreetMap contributors',
-  });
-
-  map.addLayer({
-    id: 'world',
-    type: 'raster',
-    source: 'world',
-    layout: { visibility: 'visible' },
-    paint: {
-      'raster-opacity': 1,
-      'raster-fade-duration': 0,
-    },
-  });
-}
-
-/* ------------------------------------------------------------------ */
-/* Слои данных                                                        */
-/* ------------------------------------------------------------------ */
-
-function addOsnova(map: MapLibreMap, data: GeoJSON.FeatureCollection) {
-  map.addSource('osnova', {
-    type: 'geojson',
-    data,
-    generateId: true,
-  });
-
-  map.addLayer({
-    id: 'osnova-polygons',
-    type: 'fill',
-    source: 'osnova',
-    filter: ['==', ['geometry-type'], 'Polygon'],
-    paint: {
-      'fill-color': '#FFFACD',
-      'fill-opacity': 0.75,
-    },
-  });
-  map.addLayer({
-    id: 'osnova-polygons-outline',
-    type: 'line',
-    source: 'osnova',
-    filter: ['==', ['geometry-type'], 'Polygon'],
-    paint: {
-      'line-color': '#7ba7c7',
-      'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1, 8, 2.5],
-    },
-  });
-
-  map.addLayer({
-    id: 'osnova-railroads',
-    type: 'line',
-    source: 'osnova',
-    filter: ['==', ['get', 'featurecla'], 'Railroad'],
-    paint: {
-      'line-color': '#2b2b2b',
-      'line-width': ['interpolate', ['linear'], ['zoom'], 4, 1.2, 8, 2.6],
-      'line-dasharray': [3, 2],
-      'line-opacity': 0.9,
-    },
-  });
-
-  map.addLayer({
-    id: 'osnova-roads',
-    type: 'line',
-    source: 'osnova',
-    filter: ['has', 'ROAD_TYPE'],
-    paint: {
-      'line-color': [
-        'case',
-        ['==', ['get', 'ROAD_TYPE'], 'Expressway'],
-        '#e67e22',
-        ['==', ['get', 'ROAD_TYPE'], 'Other Highway'],
-        '#f0a050',
-        '#cccccc',
-      ],
-      'line-width': ['interpolate', ['linear'], ['zoom'], 4, 1, 6, 1.8, 8, 3.2],
-      'line-opacity': 0.95,
-    },
-  });
-
-  map.addLayer({
-    id: 'osnova-boundaries',
-    type: 'line',
-    source: 'osnova',
-    filter: ['==', ['get', 'STATUS'], 'International Boundary'],
-    paint: {
-      'line-color': '#444',
-      'line-width': ['interpolate', ['linear'], ['zoom'], 4, 1.6, 8, 3.2],
-      'line-opacity': 0.95,
-    },
-  });
-
-  map.addLayer({
-    id: 'osnova-mountains',
-    type: 'circle',
-    source: 'osnova',
-    filter: ['all', ['has', 'elevation'], ['!=', ['get', 'elevation'], null]],
-    paint: {
-      'circle-radius': ['interpolate', ['linear'], ['zoom'], 4, 4.5, 8, 8],
-      'circle-color': [
-        'case',
-        ['<', ['get', 'elevation'], 0],
-        '#3d6db3',
-        '#8B4513',
-      ],
-      'circle-stroke-color': '#ffffff',
-      'circle-stroke-width': 2,
-    },
-  });
-
-  map.addLayer({
-    id: 'osnova-cities',
-    type: 'circle',
-    source: 'osnova',
-    filter: ['has', 'population'],
-    paint: {
-      'circle-radius': [
-        'interpolate',
-        ['linear'],
-        ['get', 'population'],
-        100_000, 10,
-        500_000, 15,
-        1_000_000, 20,
-        5_000_000, 30,
-        15_000_000, 50,
-      ],
-      'circle-color': '#1a1a1a',
-      'circle-stroke-color': '#ffffff',
-      'circle-stroke-width': 2.2,
-    },
-  });
-
-  map.addLayer({
-    id: 'osnova-cities-labels',
-    type: 'symbol',
-    source: 'osnova',
-    filter: ['has', 'population'],
-    minzoom: 3,
-    layout: {
-      'text-field': ['coalesce', ['get', 'name_ru'], ['get', 'name_local']],
-      'text-font': ['Noto Sans Regular'],
-      'text-size': [
-        'interpolate',
-        ['linear'],
-        ['get', 'population'],
-        100_000, 20,
-        1_000_000, 30,
-        15_000_000, 50,
-      ],
-      'text-offset': [0, 1.2],
-      'text-anchor': 'top',
-      'text-allow-overlap': false,
-      'text-optional': true,
-    },
-    paint: {
-      'text-color': '#111',
-      'text-halo-color': '#ffffff',
-      'text-halo-width': 2,
-    },
-  });
-
-  map.addLayer({
-    id: 'osnova-mountains-labels',
-    type: 'symbol',
-    source: 'osnova',
-    filter: [
-      'all',
-      ['has', 'elevation'],
-      ['!=', ['get', 'name_ru'], ' '],
-      ['!=', ['get', 'name_ru'], null],
-    ],
-    minzoom: 5,
-    layout: {
-      'text-field': [
-        'concat',
-        ['coalesce', ['get', 'name_ru'], ['get', 'name_en'], ''],
-        ' ',
-        ['to-string', ['get', 'elevation']],
-        ' м',
-      ],
-      'text-font': ['Noto Sans Regular'],
-      'text-size': 14,
-      'text-offset': [0, 1.3],
-      'text-anchor': 'top',
-      'text-optional': true,
-    },
-    paint: {
-      'text-color': '#5a2d0c',
-      'text-halo-color': '#ffffff',
-      'text-halo-width': 1.8,
-    },
-  });
-}
-
-/* ------------------------------------------------------------------ */
-/* Ховер-попапы                                                       */
-/* ------------------------------------------------------------------ */
-
-function attachInteractions(map: MapLibreMap) {
-  const popup = new maplibregl.Popup({
-    closeButton: false,
-    closeOnClick: false,
-    offset: 14,
-    maxWidth: '320px',
-  });
-
-  const showCity = (e: MapLayerMouseEvent) => {
-    const f = e.features?.[0];
-    if (!f) return;
-    const p = f.properties as Record<string, unknown>;
-    map.getCanvas().style.cursor = 'pointer';
-
-    popup
-      .setLngLat(e.lngLat)
-      .setHTML(
-        `<div style="font-family:system-ui;font-size:16px;line-height:1.5">
-           <strong>${escapeHtml(String(p.name_ru ?? p.name_local ?? '—'))}</strong><br/>
-           <span style="color:#666">${escapeHtml(String(p.name_local ?? ''))}</span><br/>
-           <span>Население: <b>${formatNumber(p.population)}</b></span><br/>
-           <span style="color:#888">${escapeHtml(String(p.country_iso ?? ''))}</span>
-         </div>`,
-      )
-      .addTo(map);
-  };
-
-  const showFeature = (e: MapLayerMouseEvent) => {
-    const f = e.features?.[0];
-    if (!f) return;
-    const p = f.properties as Record<string, unknown>;
-    map.getCanvas().style.cursor = 'pointer';
-
-    const rows: string[] = [];
-    if (p.name_ru && p.name_ru !== ' ') {
-      rows.push(`<strong>${escapeHtml(String(p.name_ru))}</strong>`);
-    }
-    if (typeof p.elevation === 'number') rows.push(`Высота: ${p.elevation} м`);
-    if (p.ROAD_TYPE) rows.push(`Тип: ${escapeHtml(String(p.ROAD_TYPE))}`);
-    if (p.LABEL && p.LABEL !== ' ') rows.push(`Метка: ${escapeHtml(String(p.LABEL))}`);
-    if (p.STATUS) rows.push(escapeHtml(String(p.STATUS)));
-    if (p.COUNTRY1 && p.COUNTRY2) {
-      rows.push(`${escapeHtml(String(p.COUNTRY1))} ↔ ${escapeHtml(String(p.COUNTRY2))}`);
-    }
-
-    popup
-      .setLngLat(e.lngLat)
-      .setHTML(
-        `<div style="font-family:system-ui;font-size:16px;line-height:1.5">
-           ${rows.join('<br/>') || '<em>Объект</em>'}
-         </div>`,
-      )
-      .addTo(map);
-  };
-
-  const hide = () => {
-    map.getCanvas().style.cursor = '';
-    popup.remove();
-  };
-
-  map.on('mousemove', 'osnova-cities', showCity);
-  map.on('mouseleave', 'osnova-cities', hide);
-
-  for (const layer of [
-    'osnova-mountains',
-    'osnova-roads',
-    'osnova-boundaries',
-    'osnova-railroads',
-  ]) {
-    map.on('mousemove', layer, showFeature);
-    map.on('mouseleave', layer, hide);
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/* Утилиты геометрии                                                  */
-/* ------------------------------------------------------------------ */
-
-function computeBounds(
-  fc: GeoJSON.FeatureCollection,
-): [[number, number], [number, number]] | null {
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-
-  const walk = (coords: unknown): void => {
-    if (!Array.isArray(coords)) return;
-    if (
-      coords.length >= 2 &&
-      typeof coords[0] === 'number' &&
-      typeof coords[1] === 'number'
-    ) {
-      const x = coords[0];
-      const y = coords[1];
-      if (x < minX) minX = x;
-      if (y < minY) minY = y;
-      if (x > maxX) maxX = x;
-      if (y > maxY) maxY = y;
-      return;
-    }
-    for (const c of coords) walk(c);
-  };
-
-  for (const f of fc.features) {
-    if (!f.geometry) continue;
-    walk((f.geometry as { coordinates?: unknown }).coordinates);
-  }
-
-  if (!Number.isFinite(minX)) return null;
-  return [[minX, minY], [maxX, maxY]];
-}
-
-function padBounds(
-  b: [[number, number], [number, number]],
-  factor: number,
-): [[number, number], [number, number]] {
-  const [[minX, minY], [maxX, maxY]] = b;
-  const dx = (maxX - minX) * factor;
-  const dy = (maxY - minY) * factor;
-  return [[minX - dx, minY - dy], [maxX + dx, maxY + dy]];
-}
-
-/* ------------------------------------------------------------------ */
-/* Утилиты                                                            */
-/* ------------------------------------------------------------------ */
-
-function formatNumber(n: unknown): string {
-  if (typeof n !== 'number' || Number.isNaN(n)) return '—';
-  return n.toLocaleString('ru-RU');
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!),
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/* Легенда                                                            */
-/* ------------------------------------------------------------------ */
-
-function LegendRow({
-  color,
-  label,
-  dashed,
-  round,
-}: {
-  color: string;
-  label: string;
-  dashed?: boolean;
-  round?: boolean;
-}) {
-  return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 18,
-        marginTop: 14,
-      }}
-    >
-      <span
+      {/* БОКОВАЯ ПАНЕЛЬ УПРАВЛЕНИЯ СЛОЯМИ */}
+      <aside
         style={{
-          display: 'inline-block',
-          width: round ? 26 : 44,
-          height: round ? 26 : 18,
-          borderRadius: round ? '50%' : 4,
-          background: dashed
-            ? `repeating-linear-gradient(90deg, ${color} 0 10px, transparent 10px 16px)`
-            : color,
-          border: round ? '3px solid #fff' : 'none',
-          boxShadow: round ? '0 0 0 2px rgba(0,0,0,0.2)' : 'none',
-          flexShrink: 0,
+          width: '330px',
+          minWidth: '330px',
+          backgroundColor: '#ffffff',
+          borderRight: '1px solid #e5e7eb',
+          padding: '16px',
+          overflowY: 'auto',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '16px',
+          zIndex: 1000,
         }}
-      />
-      <span style={{ fontSize: 22, color: '#222', lineHeight: 1.2 }}>
-        {label}
-      </span>
+      >
+        <div>
+          <h2 style={{ margin: '0 0 4px 0', fontSize: '18px', color: '#111827' }}>
+            Картографическая основа
+          </h2>
+          <p style={{ margin: 0, fontSize: '12px', color: '#6b7280' }}>
+            Гидрография, транспортная сеть и города
+          </p>
+        </div>
+
+        {loadingError && (
+          <div
+            style={{
+              padding: '10px',
+              backgroundColor: '#fef2f2',
+              border: '1px solid #f87171',
+              borderRadius: '6px',
+              fontSize: '12px',
+              color: '#991b1b',
+            }}
+          >
+            {loadingError}
+          </div>
+        )}
+
+        {/* Блок 1: Подложка OSM */}
+        <section style={{ borderTop: '1px solid #e5e7eb', paddingTop: '12px' }}>
+          <div style={{ fontWeight: 600, fontSize: '13px', marginBottom: '8px', color: '#374151' }}>
+            Базовая подложка
+          </div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={showOsm}
+              onChange={(e) => setShowOsm(e.target.checked)}
+            />
+            Подложка OpenStreetMap
+          </label>
+          {showOsm && (
+            <div style={{ marginTop: '8px', fontSize: '12px', color: '#4b5563' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                <span>Непрозрачность OSM:</span>
+                <span>{Math.round(osmOpacity * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min={0.1}
+                max={1}
+                step={0.05}
+                value={osmOpacity}
+                onChange={(e) => setOsmOpacity(parseFloat(e.target.value))}
+                style={{ width: '100%' }}
+              />
+            </div>
+          )}
+        </section>
+
+        {/* Блок 2: Тематические и общегеографические слои */}
+        <section style={{ borderTop: '1px solid #e5e7eb', paddingTop: '12px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <div style={{ fontWeight: 600, fontSize: '13px', color: '#374151' }}>
+            Векторные слои (public/)
+          </div>
+
+          {/* Реки */}
+          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={showRivers}
+              onChange={(e) => setShowRivers(e.target.checked)}
+            />
+            <span>Речная сеть ({riversData?.features.length ?? 0})</span>
+          </label>
+
+          {/* Железные дороги */}
+          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={showRails}
+              onChange={(e) => setShowRails(e.target.checked)}
+            />
+            <span>Железные дороги ({railsData?.features.length ?? 0})</span>
+          </label>
+
+          {/* Автодороги */}
+          <div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={showRoads}
+                onChange={(e) => setShowRoads(e.target.checked)}
+              />
+              <span>Автомагистрали и дороги ({roadsData?.features.length ?? 0})</span>
+            </label>
+
+            {showRoads && (
+              <div style={{ marginLeft: '22px', marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <select
+                  value={roadFilter}
+                  onChange={(e) => setRoadFilter(e.target.value as RoadFilterMode)}
+                  style={{
+                    padding: '4px 6px',
+                    fontSize: '12px',
+                    borderRadius: '4px',
+                    border: '1px solid #d1d5db',
+                  }}
+                >
+                  <option value="all">Все категории дорог</option>
+                  <option value="major">Магистрали и главные шоссе</option>
+                  <option value="expressway_only">Только автомагистрали (Otoyol)</option>
+                </select>
+
+                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#4b5563', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={onlyTurkeyRoads}
+                    onChange={(e) => setOnlyTurkeyRoads(e.target.checked)}
+                  />
+                  Только территория Турции (TUR)
+                </label>
+              </div>
+            )}
+          </div>
+
+          {/* Города */}
+          <div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={showCities}
+                onChange={(e) => setShowCities(e.target.checked)}
+              />
+              <span>Города ({citiesData?.features.length ?? 0})</span>
+            </label>
+
+            {showCities && (
+              <div style={{ marginLeft: '22px', marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#4b5563', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={showCityLabels}
+                    onChange={(e) => setShowCityLabels(e.target.checked)}
+                  />
+                  Постоянные подписи городов
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#4b5563', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={showForeignCities}
+                    onChange={(e) => setShowForeignCities(e.target.checked)}
+                  />
+                  Показывать зарубежные города
+                </label>
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* Блок 3: Легенда */}
+        <section style={{ borderTop: '1px solid #e5e7eb', paddingTop: '12px', fontSize: '12px', color: '#374151' }}>
+          <div style={{ fontWeight: 600, marginBottom: '8px' }}>Условные обозначения</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ width: '22px', height: '4px', background: '#ff7f00', border: '1px solid #7f2704', display: 'inline-block' }} />
+              <span>Автомагистрали (Expressway)</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ width: '22px', height: '3px', background: '#fdb863', border: '1px solid #8c510a', display: 'inline-block' }} />
+              <span>Государственные шоссе (Highway)</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ width: '22px', height: '3px', background: '#99000d', display: 'inline-block' }} />
+              <span>Высокоскоростные ж/д (ВСМ)</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ width: '22px', height: '3px', background: '#252525', borderTop: '1px dashed #fff', display: 'inline-block' }} />
+              <span>Железные дороги и ж/д паром</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ width: '22px', height: '2.5px', background: '#1f78b4', display: 'inline-block' }} />
+              <span>Реки (по градации водотока)</span>
+            </div>
+          </div>
+        </section>
+
+        {/* Блок 4: Карточка выбранного объекта */}
+        {selectedInfo && (
+          <section
+            style={{
+              marginTop: 'auto',
+              padding: '12px',
+              backgroundColor: '#f8fafc',
+              border: '1px solid #cbd5e1',
+              borderRadius: '8px',
+              fontSize: '12px',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', fontWeight: 600 }}>
+                {selectedInfo.layer}
+              </span>
+              <button
+                onClick={() => setSelectedInfo(null)}
+                style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: '14px', color: '#64748b' }}
+              >
+                ✕
+              </button>
+            </div>
+            <div style={{ fontWeight: 700, fontSize: '14px', margin: '4px 0 8px 0', color: '#0f172a' }}>
+              {selectedInfo.title}
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              {Object.entries(selectedInfo.details).map(([key, val]) => (
+                <div key={key} style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
+                  <span style={{ color: '#475569' }}>{key}:</span>
+                  <span style={{ fontWeight: 600, color: '#0f172a', textAlign: 'right' }}>{val}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+      </aside>
+
+      {/* КОНТЕЙНЕР КАРТЫ */}
+      <main style={{ flex: 1, position: 'relative' }}>
+        <div
+          ref={mapContainerRef}
+          style={{
+            width: '100%',
+            height: '100%',
+            backgroundColor: showOsm ? '#e5e7eb' : '#f4f1ea',
+          }}
+        />
+      </main>
     </div>
   );
 }
-
-/* ------------------------------------------------------------------ */
-/* Стили                                                              */
-/* ------------------------------------------------------------------ */
-
-const styles: Record<string, CSSProperties> = {
-  root: { position: 'relative', width: '100%', height: '100vh' },
-  map: { position: 'absolute', inset: 0 },
-  toast: {
-    position: 'absolute',
-    top: 20,
-    left: '50%',
-    transform: 'translateX(-50%)',
-    padding: '12px 24px',
-    borderRadius: 8,
-    background: 'rgba(255,255,255,0.95)',
-    boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
-    fontSize: 18,
-    zIndex: 10,
-  },
-  toggleBtn: {
-    position: 'absolute',
-    top: 110,
-    right: 12,
-    zIndex: 10,
-    padding: '10px 16px',
-    fontSize: 16,
-    fontWeight: 600,
-    borderRadius: 8,
-    border: '2px solid #cbd5e1',
-    cursor: 'pointer',
-    boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
-    transition: 'background 0.15s, color 0.15s, border-color 0.15s',
-    fontFamily: 'system-ui, sans-serif',
-  },
-  legend: {
-    position: 'absolute',
-    bottom: 40,
-    left: 40,
-    padding: '28px 34px',
-    borderRadius: 16,
-    background: 'rgba(255,255,257,0.97)',
-    boxShadow: '0 10px 32px rgba(0,0,0,0.22)',
-    zIndex: 10,
-    minWidth: 380,
-  },
-  legendTitle: {
-    fontSize: 22,
-    fontWeight: 800,
-    marginBottom: 16,
-    textTransform: 'uppercase',
-    letterSpacing: 0.8,
-    color: '#111',
-    borderBottom: '2px solid #e0e0e0',
-    paddingBottom: 12,
-  },
-};
